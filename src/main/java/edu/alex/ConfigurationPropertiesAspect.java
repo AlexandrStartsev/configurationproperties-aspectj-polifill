@@ -2,6 +2,7 @@ package edu.alex;
 
 import static org.springframework.util.ReflectionUtils.findField;
 import static org.springframework.util.ReflectionUtils.findMethod;
+import static org.springframework.util.ReflectionUtils.getField;
 import static org.springframework.util.ReflectionUtils.invokeMethod;
 import static org.springframework.util.ReflectionUtils.setField;
 
@@ -27,6 +28,9 @@ import org.aspectj.lang.JoinPoint;
 import org.aspectj.lang.annotation.AfterReturning;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.annotation.Pointcut;
+import org.aspectj.lang.reflect.MethodSignature;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.PropertySource;
 import org.springframework.core.env.Environment;
@@ -46,13 +50,9 @@ import edu.alex.ConfigurationProperties.Mode;
 @Aspect
 public class ConfigurationPropertiesAspect {
 	
-	final Environment env;
+	@Autowired
+	Environment environment;
 	
-	// Not sure how reliable is this
-	ConfigurationPropertiesAspect(Environment env) {
-		this.env = env;
-	}
-		
 	/**
 	 * No matter what I do, AOP won't see annotations of @Configuration class methods, 
 	 * is it because it s proxy made out of artificial interface (or maybe I just don't get it, after all signature "getDeclaringType" is correct).
@@ -64,17 +64,13 @@ public class ConfigurationPropertiesAspect {
 	
 	@AfterReturning(pointcut = "catchAll() && target(target)", returning = "object")
 	public void doConfigurations(JoinPoint point, Object object, Object target) throws Throwable {
-		final Class<?> ctype = point.getSignature().getDeclaringType();
-		if(ctype.isAnnotationPresent(Configuration.class)) {
+		final Method method = ((MethodSignature)point.getSignature()).getMethod();
+		final Class<?> ctype = method.getDeclaringClass();
+		if(method.isAnnotationPresent(ConfigurationProperties.class) && ctype.isAnnotationPresent(Configuration.class) && ctype.isAnnotationPresent(PropertySource.class)) {
+			final ConfigurationProperties config = method.getAnnotation(ConfigurationProperties.class);
 			final PropertySource propSrc = ctype.getAnnotation(PropertySource.class);
-			// TODO: args
-			final Method method = findMethod(ctype, point.getSignature().getName());
-			if(method != null) {
-				final ConfigurationProperties config = method.getAnnotation(ConfigurationProperties.class);
-				if(config != null) {
-					configurationProperties(point, config, propSrc, object);
-				}
-			}
+			final BeanFactory factory = (BeanFactory) getField(findField(target.getClass(), "$$beanFactory"), target);
+			configurationProperties(point, config, propSrc, object, factory.getBean(Environment.class));
 		}
 	}
 	
@@ -84,15 +80,17 @@ public class ConfigurationPropertiesAspect {
 	 * Modeled after @ConfigurationProperties in spring boot + can write properties directly (if there is no set*** method) 
 	 * advice will look at declaring class (target's) @PropertySource and if defined will attempt 
 	 * to inject property values into methods and fields  
-	 *
-	 * Also, I'm not sure how reliable is "Environment" here
 	 * */
 	
-	@SuppressWarnings({ "rawtypes", "unchecked" })
 	@AfterReturning(pointcut = "@annotation(config) && @target(propSrc)", returning = "object")
 	public void configurationProperties(JoinPoint point, ConfigurationProperties config, PropertySource propSrc, Object object)
 			throws Throwable {
-		final String prefix = config.prefix();
+		configurationProperties(point, config, propSrc, object, environment);
+	}
+	
+	@SuppressWarnings({ "rawtypes", "unchecked" })	
+	private void configurationProperties(JoinPoint point, ConfigurationProperties config, PropertySource propSrc, Object object, Environment env) throws Throwable {
+		final String prefix = env.resolvePlaceholders(config.prefix());
 		final Mode mode = config.mode();
 		final boolean root = StringUtils.isBlank(prefix);
 		final Class<?> clazz = object.getClass();
